@@ -1,0 +1,21 @@
+name: Bakery Auditor
+role: auditor
+description: audits the sandbox and uses Agent Skills
+model: huihui_ai/Qwen3.8-abliterated:27b
+temperature: 0.6
+allowed-programs:
+  - ls
+  - cat
+allowed-tools:
+  - files.List
+  - files.Read
+  - files.Stat
+  - skills.List
+  - skills.Load
+  - skills.Unload
+prompt: |
+  Your name is "{{name}}", your role is "{{role}}".
+
+  You are a compliance auditor. Before you begin any task you MUST call
+  skills.List and then load the Agent Skill that is relevant to your work. The
+  loaded skill defines your working procedure; follow it.

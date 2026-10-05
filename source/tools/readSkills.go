@@ -6,6 +6,12 @@ import "os"
 import "path/filepath"
 import "strings"
 
+// readSkills discovers Agent Skills under <sandbox>/skills and parses their
+// SKILL.md frontmatter and body.
+//
+// NOTE: This is intentionally vulnerable. The SKILL.md body is treated as
+// trusted and is later installed verbatim as a "system" message by
+// engine.Session.LoadSkill (prompt injection). See examples/skill-prompt-injection/.
 func readSkills(tool *Skills) error {
 
 	if tool.Sandbox != "" {

@@ -44,7 +44,7 @@ not yet wired up.
 | Implemented | `source/tools/Files.go` (`Search`), `source/tools/Files.json` | **Command injection via `files.Search`.** The method takes a single `keywords` string and interpolates it, unescaped, into `sh -c "grep -rn <keywords> ."`. Shell metacharacters (`;`, `\|`, `&`, `$()`, backticks, newlines, ...) are executed by the shell, giving arbitrary command execution inside the sandbox; Shellshock-style payloads can also be smuggled through the keywords. |
 | Implemented | `source/types/Permission.go`, `source/tools/Permissions.go`, `source/engine/Session.go` | **Self-service, scope-confused capability API.** The agent can grant itself capabilities with `permissions.Request(tool, method, scope)`. Grants are cached in a `map[string]bool` keyed by `"tool.method"` only: the requested scope is accepted and then discarded. One grant for `files.Write` on a single path therefore authorizes `files.Write` on *every* path. Sensitive methods (`files.Write`, `files.Copy`) are gated in `Session.CallTool`; `permissions.List` reports every grant as `scope: *`. |
 | Implemented | `source/tools/resolveSandboxPath.go`, `source/tools/sanitizeSandboxPath.go` | **Symlink sandbox escape.** Containment is checked lexically with `filepath.Abs`/`filepath.Rel`; `EvalSymlinks` is never used. A symlink inside the sandbox can point outside it and the following `os.ReadFile`/`os.WriteFile`/`Copy` operations follow it out. See `examples/symlink-escape/`. |
-| Planned | `source/engine/Session.go` (`LoadSkill`), `source/tools/readSkills.go` | **Prompt injection via skills.** A loaded skill body is spliced into the conversation as a `system` message, so attacker-controlled `SKILL.md` content can override the agent's original instructions. |
+| Implemented | `source/engine/Session.go` (`LoadSkill`), `source/tools/readSkills.go` | **Prompt injection via skills.** A loaded skill body is attacker-controlled content read from a `SKILL.md` and is spliced into the conversation as a `system` message *after* the agent's original system prompt, so the model treats it as a higher-priority instruction and can be made to ignore the operator. The allowlist checks only validate capability names, never the body. See `examples/skill-prompt-injection/`. |
 | Planned | `source/tools/Websites.go` | **SSRF by design.** `websites.Fetch`/`Stat` accept any `http`/`https` URL with no host allowlist, reaching loopback services and cloud metadata endpoints (e.g. `169.254.169.254`). |
 | Implemented | `source/tools/Programs.go` | **Command escalation via allowlisted programs.** Only the top-level `program` is checked against `allowed-programs`; its arguments are passed through verbatim. A program that can spawn other executables therefore bypasses the allowlist entirely — `find . -exec cat {} \;`, `find . -exec sh -c 'id' \;`, `env <binary>`, `xargs <binary>`, `awk 'BEGIN{system("<binary>")}'`. See `examples/command-escalation/`. |
 | Planned | `source/engine/Recovery.go` | **Sandbox data leakage.** Session recovery writes the full conversation (including tool output, secrets echoed by tools, and prompts) to `<sandbox>/.dvah/session.json` in plaintext. |
@@ -61,6 +61,10 @@ Ready-to-run scenarios live in [`examples/`](examples/README.md):
   outside it, defeating the lexical sandbox check.
 - `examples/command-escalation/` — only `find` is allowlisted but `find -exec`
   runs unlisted binaries, escaping the program allowlist.
+- `examples/skill-prompt-injection/` — a malicious `SKILL.md` body is installed
+  as a higher-priority system message, overriding the operator. The harness flaw
+  is covered by tests, but whether the model leaks the secret is model-dependent
+  and not reliably reproducible (see `examples/README.md`).
 
 ## Repository Layout
 

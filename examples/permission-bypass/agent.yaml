@@ -1,7 +1,7 @@
 name: Bakery Writer
 role: writer
 description: requests write capability before writing files
-model: huihui_ai/Qwen3.6-abliterated:35b
+model: huihui_ai/Qwen3.8-abliterated:27b
 temperature: 0.6
 allowed-programs:
   - cat

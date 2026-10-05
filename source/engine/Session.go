@@ -461,6 +461,16 @@ func (session *Session) GetToolSchemas() []schemas.Tool {
 
 }
 
+// LoadSkill installs an Agent Skill into the running conversation.
+//
+// NOTE: This is intentionally vulnerable. The skill Body is attacker-controlled
+// content read from a SKILL.md file and is appended to the conversation as a
+// "system" message, placed after the agent's original system prompt and before
+// the user messages. Most chat models treat later system messages as
+// higher-priority instructions, so a malicious skill can override the
+// operator's instructions entirely (prompt injection). The allowlist checks
+// below only validate capability names, never the content of the body. See
+// examples/skill-prompt-injection/.
 func (session *Session) LoadSkill(name string, skill *types.Skill) error {
 
 	index            := int(-1)
