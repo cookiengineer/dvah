@@ -1,0 +1,12 @@
+# Ignore dvah builds
+/dvah
+/source/dvah
+/build/
+!/build/.gitkeep
+
+# Ignore dvah runtime state (session recovery lives inside the sandbox)
+.dvah/
+
+# Ignore vendor
+/vendor/
+!/vendor/.gitkeep

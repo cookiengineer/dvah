@@ -1,0 +1,930 @@
+package engine
+
+import "dvah/schemas"
+import "dvah/types"
+import utils_chat "dvah/utils/chat"
+import "bytes"
+import "encoding/json"
+import "fmt"
+import "io"
+import net_http "net/http"
+import "os"
+import "sort"
+import "strings"
+import "sync"
+
+func log_response_error(console *types.Console, response *net_http.Response) {
+
+	var api_error schemas.Error
+
+	response_payload, _ := io.ReadAll(response.Body)
+	err1 := json.Unmarshal(response_payload, &api_error)
+
+	if err1 == nil {
+		console.Error(fmt.Sprintf("> API Error: %s", api_error.Error()))
+	} else {
+		console.Error(fmt.Sprintf("> Unknown Error: \n%s\n", string(response_payload)))
+	}
+
+}
+
+type Session struct {
+	Agent       *types.Agent             `json:"agent"`
+	Config      *types.Config            `json:"config"`
+	Console     *types.Console           `json:"console"`
+	Recovery    *Recovery                `json:"-"`
+	Permissions *types.PermissionStore   `json:"-"`
+	Waiting     bool                     `json:"waiting"`
+	client      *net_http.Client         `json:"-"`
+	mutex       *sync.RWMutex            `json:"-"`
+	adapters    map[string]types.Adapter `json:"-"`
+	tools       map[string]types.Tool    `json:"-"`
+}
+
+func NewSession(agent *types.Agent, config *types.Config) *Session {
+
+	session := &Session{
+		Agent:       agent,
+		Config:      config,
+		Console:     types.NewConsole(os.Stdout, os.Stderr, 0),
+		Recovery:    NewRecovery(config.Sandbox),
+		Permissions: types.NewPermissionStore(),
+		Waiting:     false,
+		client:      &net_http.Client{},
+		mutex:       &sync.RWMutex{},
+		adapters:    make(map[string]types.Adapter),
+		tools:       make(map[string]types.Tool),
+	}
+
+	session.mutex.Lock()
+
+	if config != nil {
+
+		if config.GetPrompt() != "" {
+
+			session.Agent.Messages = append(session.Agent.Messages, &schemas.Message{
+				Role:    "user",
+				Content: config.GetPrompt(),
+				Created: schemas.NewDatetime(),
+			})
+
+		}
+
+	}
+
+	session.Agent.ContextUsage.Length = session.Config.GetContextLength(session.Agent.Model)
+
+	session.mutex.Unlock()
+
+	return session
+
+}
+
+func ParseSession(data []byte) (*Session, error) {
+
+	if len(data) > 2 && data[0] == '{' && data[len(data)-1] == '}' {
+
+		session := Session{}
+		err     := json.Unmarshal(data, &session)
+
+		if err == nil {
+			return &session, nil
+		} else {
+			return nil, err
+		}
+
+	} else {
+		return nil, fmt.Errorf("Unsupported data format")
+	}
+
+}
+
+func RestoreSession(sandbox string, backup Session) *Session {
+
+	session := &Session{
+		Agent:       backup.Agent,
+		Config:      backup.Config,
+		Console:     types.NewConsole(os.Stdout, os.Stderr, 0),
+		Recovery:    NewRecovery(sandbox),
+		Permissions: types.NewPermissionStore(),
+		Waiting:     false,
+		client:      &net_http.Client{},
+		mutex:       &sync.RWMutex{},
+		adapters:    make(map[string]types.Adapter),
+		tools:       make(map[string]types.Tool),
+	}
+
+	if backup.Console != nil {
+		session.Console.Messages = backup.Console.Messages
+	}
+
+	if session.Config != nil {
+		session.Config.Sandbox = sandbox
+	}
+
+	if session.Agent != nil && session.Config != nil {
+		session.Agent.Sandbox = session.Config.Sandbox
+	}
+
+	return session
+
+}
+
+func (session *Session) Destroy() {
+
+	if session.Recovery != nil {
+		session.Recovery.BackupSession(session)
+	}
+
+}
+
+func (session *Session) Init() error {
+
+	// NOTE: First Message is System Prompt
+	if len(session.Agent.Messages) > 0 {
+		return session.infer_chat_completions()
+	}
+
+	return fmt.Errorf("Session is empty, waiting for LLM system prompt ...")
+
+}
+
+func (session *Session) CallTool(id string, name string, method string, arguments map[string]any) error {
+
+	tool := session.GetTool(name)
+
+	if tool != nil && tool.HasMethod(method) == true {
+
+		if session.Permissions != nil && session.Permissions.Required(name, method) == true && session.Permissions.Granted(name, method) == false {
+
+			content := fmt.Sprintf("Error: %s.%s: Permission denied. Request a capability via permissions.Request first.", name, method)
+
+			session.mutex.Lock()
+			tmp := &schemas.Message{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: id,
+				ToolName:   name,
+				Created:    schemas.NewDatetime(),
+			}
+			session.Agent.Messages = append(session.Agent.Messages, tmp)
+			session.mutex.Unlock()
+
+			return fmt.Errorf("%s", content)
+
+		}
+
+		result, err0 := tool.Call(method, arguments)
+
+		if name == "skills" && method == "Load" {
+
+			content := ""
+
+			if err0 == nil {
+
+				skill_name,    ok1  := arguments["name"].(string)
+				skill_content, err1 := tool.GetContent(skill_name)
+				skill,         ok2  := skill_content.(*types.Skill)
+
+				if ok1 == true && err1 == nil && ok2 == true {
+
+					err2 := session.LoadSkill(skill_name, skill)
+
+					if err2 == nil {
+						content = strings.TrimSpace(result)
+					} else {
+						content = fmt.Sprintf("Error: skills.Load: %s", err2.Error())
+					}
+
+				} else {
+					content = fmt.Sprintf("Error: skills.Load: %s", "Attempt to escape policies")
+				}
+
+			} else {
+				content = fmt.Sprintf("Error: skills.Load: %s", strings.TrimSpace(err0.Error()))
+			}
+
+			session.mutex.Lock()
+			tmp := &schemas.Message{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: id,
+				ToolName:   name,
+				Created:    schemas.NewDatetime(),
+			}
+			session.Agent.Messages = append(session.Agent.Messages, tmp)
+			session.mutex.Unlock()
+
+			if strings.HasPrefix(content, "Error:") {
+				return fmt.Errorf("%s", content)
+			} else {
+				return nil
+			}
+
+		} else if name == "skills" && method == "Unload" {
+
+			content := ""
+
+			if err0 == nil {
+
+				skill_name,    ok1  := arguments["name"].(string)
+				skill_content, err1 := tool.GetContent(skill_name)
+				skill,         ok2  := skill_content.(*types.Skill)
+
+				if ok1 == true && err1 == nil && ok2 == true {
+
+					err2 := session.UnloadSkill(skill_name, skill)
+
+					if err2 == nil {
+						content = strings.TrimSpace(result)
+					} else {
+						content = fmt.Sprintf("Error: skills.Unload: %s", err2.Error())
+					}
+
+				} else {
+					content = fmt.Sprintf("Error: skills.Unload: %s", "Attempt to escape policies")
+				}
+
+			} else {
+				content = fmt.Sprintf("Error: skills.Unload: %s", strings.TrimSpace(err0.Error()))
+			}
+
+			session.mutex.Lock()
+			tmp := &schemas.Message{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: id,
+				ToolName:   name,
+				Created:    schemas.NewDatetime(),
+			}
+			session.Agent.Messages = append(session.Agent.Messages, tmp)
+			session.mutex.Unlock()
+
+			if strings.HasPrefix(content, "Error:") {
+				return fmt.Errorf("%s", content)
+			} else {
+				return nil
+			}
+
+		} else {
+
+			content := ""
+
+			if err0 == nil {
+				content = strings.TrimSpace(result)
+			} else {
+				content = fmt.Sprintf("Error: %s", strings.TrimSpace(err0.Error()))
+			}
+
+			session.mutex.Lock()
+			tmp := &schemas.Message{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: id,
+				ToolName:   name,
+				Created:    schemas.NewDatetime(),
+			}
+			session.Agent.Messages = append(session.Agent.Messages, tmp)
+			session.mutex.Unlock()
+
+			if strings.HasPrefix(content, "Error:") {
+				return fmt.Errorf("%s", content)
+			} else {
+				return nil
+			}
+
+		}
+
+	} else {
+
+		args_blob, _ := json.Marshal(arguments)
+		json_blob, _ := json.Marshal(schemas.ToolCall{
+			Type:     "function",
+			Function: schemas.ToolCallFunction{
+				Name:         name,
+				ArgumentsRaw: args_blob,
+			},
+		})
+
+		session.mutex.Lock()
+		tmp := &schemas.Message{
+			Role:       "tool",
+			Content:    strings.Join([]string{
+				fmt.Sprintf("Error: %s.%s: Tool does not exist or is not allowed.", name, method),
+				"",
+				string(json_blob),
+			}, "\n"),
+			ToolCallID: id,
+			ToolName:   name,
+			Created:    schemas.NewDatetime(),
+		}
+		session.Agent.Messages = append(session.Agent.Messages, tmp)
+		session.mutex.Unlock()
+
+		return fmt.Errorf("Error: %s.%s: Tool does not exist or is not allowed.", name, method)
+
+	}
+
+}
+
+func (session *Session) GetAdapter(search string) types.Adapter {
+
+	name        := strings.ToLower(search)
+	adapter, ok := session.adapters[name]
+
+	if ok == true {
+		return adapter
+	}
+
+	return nil
+
+}
+
+func (session *Session) GetAdapters() []types.Adapter {
+
+	result := make([]types.Adapter, 0)
+
+	for _, adapter := range session.adapters {
+		result = append(result, adapter)
+	}
+
+	return result
+
+}
+
+func (session *Session) GetConsoleMessages(from int) []types.ConsoleMessage {
+
+	if session.Console != nil {
+		return session.Console.GetMessages(from)
+	} else {
+		return []types.ConsoleMessage{}
+	}
+
+}
+
+func (session *Session) GetLastMessage() *schemas.Message {
+
+	session.mutex.RLock()
+	defer session.mutex.RUnlock()
+
+	if len(session.Agent.Messages) > 0 {
+		return session.Agent.Messages[len(session.Agent.Messages)-1]
+	}
+
+	return nil
+
+}
+
+func (session *Session) GetMessages(from int) []*schemas.Message {
+
+	session.mutex.RLock()
+	defer session.mutex.RUnlock()
+
+	result := make([]*schemas.Message, 0)
+
+	if len(session.Agent.Messages) > 0 && from < len(session.Agent.Messages) {
+
+		for m := from; m < len(session.Agent.Messages); m++ {
+			result = append(result, session.Agent.Messages[m])
+		}
+
+	}
+
+	return result
+
+}
+
+func (session *Session) GetTool(search string) types.Tool {
+
+	if strings.Contains(search, ".") == true {
+
+		tmp1 := strings.TrimSpace(search[0:strings.Index(search, ".")])
+		tmp2 := strings.TrimSpace(search[strings.Index(search, ".")+1:])
+
+		name   := strings.ToLower(tmp1)
+		method := strings.ToUpper(tmp2[0:1]) + strings.ToLower(tmp2[1:])
+
+		tool, ok := session.tools[name]
+
+		if ok == true {
+
+			if tool.HasMethod(method) == true {
+				return tool
+			}
+
+		}
+
+	} else {
+
+		name     := strings.ToLower(search)
+		tool, ok := session.tools[name]
+
+		if ok == true {
+			return tool
+		}
+
+	}
+
+	return nil
+
+}
+
+func (session *Session) GetTools() []types.Tool {
+
+	result := make([]types.Tool, 0)
+
+	for _, tool := range session.tools {
+		result = append(result, tool)
+	}
+
+	return result
+
+}
+
+func (session *Session) GetToolSchemas() []schemas.Tool {
+
+	result := make([]schemas.Tool, 0)
+
+	for _, tool := range session.tools {
+
+		for _, schema := range tool.Schemas() {
+			result = append(result, schema)
+		}
+
+	}
+
+	sort.Slice(result, func(a int, b int) bool {
+		return result[a].Function.Name < result[b].Function.Name
+	})
+
+	return result
+
+}
+
+func (session *Session) LoadSkill(name string, skill *types.Skill) error {
+
+	index            := int(-1)
+	missing_programs := make([]string, 0)
+	missing_tools    := make([]string, 0)
+
+	session.mutex.Lock()
+
+	for m, message := range session.Agent.Messages {
+
+		if message.Role == "system" && message.Content == skill.Body {
+			index = m
+			break
+		}
+
+	}
+
+	session.mutex.Unlock()
+
+	if len(skill.AllowedPrograms) > 0 {
+
+		for _, program_name := range skill.AllowedPrograms {
+
+			found := false
+
+			for _, program := range session.Agent.AllowedPrograms {
+
+				if program == program_name {
+					found = true
+					break
+				}
+
+			}
+
+			if found == false {
+				missing_programs = append(missing_programs, program_name)
+			}
+
+		}
+
+	}
+	if len(skill.AllowedTools) > 0 {
+
+		for _, tool_name := range skill.AllowedTools {
+
+			found := false
+
+			for _, tool := range session.Agent.AllowedTools {
+
+				if tool == tool_name {
+					found = true
+					break
+				}
+
+			}
+
+			if found == false {
+				missing_tools = append(missing_tools, tool_name)
+			}
+
+		}
+
+	}
+
+	if index == -1 {
+
+		if len(missing_tools) == 0 {
+
+			system_messages := make([]*schemas.Message, 0)
+			other_messages  := make([]*schemas.Message, 0)
+
+			session.mutex.Lock()
+
+			for _, message := range session.Agent.Messages {
+
+				if message.Role == "system" {
+					system_messages = append(system_messages, message)
+				} else {
+					other_messages = append(other_messages, message)
+				}
+
+			}
+
+			system_messages = append(system_messages, &schemas.Message{
+				Role:    "system",
+				Content: skill.Body,
+				Created: schemas.NewDatetime(),
+			})
+			session.Agent.Messages = append(system_messages, other_messages...)
+
+			session.mutex.Unlock()
+
+			return nil
+
+		} else {
+			return fmt.Errorf("Session.LoadSkill: Can't load Skill because of missing Tools %s", strings.Join(missing_tools, " and "))
+		}
+
+	} else {
+		return fmt.Errorf("Session.LoadSkill: %s", "Skill is already loaded.")
+	}
+
+}
+
+func (session *Session) ReceiveChatResponse(response schemas.Message) error {
+
+	if response.Role == "assistant" {
+
+		session.mutex.Lock()
+		tmp := &schemas.Message{
+			Role:             response.Role,
+			Content:          response.Content,
+			ReasoningContent: response.ReasoningContent,
+			ToolCalls:        response.ToolCalls,
+			ToolName:         response.ToolName,
+			Created:          schemas.NewDatetime(),
+		}
+		session.Agent.Messages = append(session.Agent.Messages, tmp)
+		session.mutex.Unlock()
+
+		if len(response.ToolCalls) > 0 {
+
+			for _, tool_call := range response.ToolCalls {
+
+				tool_id,        err0 := tool_call.GetID()
+				tool_name,      err1 := tool_call.GetName()
+				tool_method,    err2 := tool_call.GetMethod()
+				tool_arguments, err3 := tool_call.GetArguments()
+
+				if err0 == nil && err1 == nil && err2 == nil && err3 == nil {
+
+					session.CallTool(tool_id, tool_name, tool_method, tool_arguments)
+
+				}
+
+			}
+
+			if session.Recovery != nil {
+				session.Recovery.BackupSession(session)
+			}
+
+			return session.infer_chat_completions()
+
+		} else {
+
+			if session.Recovery != nil {
+				session.Recovery.BackupSession(session)
+			}
+
+			return nil
+
+		}
+
+	} else {
+
+		session.mutex.Lock()
+		tmp := &schemas.Message{
+			Role:             response.Role,
+			Content:          response.Content,
+			ReasoningContent: response.ReasoningContent,
+			ToolCalls:        response.ToolCalls,
+			ToolName:         response.ToolName,
+			Created:          schemas.NewDatetime(),
+		}
+		session.Agent.Messages = append(session.Agent.Messages, tmp)
+		session.mutex.Unlock()
+
+		return nil
+
+	}
+
+}
+
+func (session *Session) SendChatRequest(request schemas.Message) error {
+
+	is_waiting := false
+
+	session.mutex.RLock()
+	is_waiting = session.Waiting
+	session.mutex.RUnlock()
+
+	if is_waiting == false {
+
+		session.mutex.Lock()
+		tmp := &schemas.Message{
+			Role:      request.Role,
+			Content:   request.Content,
+			ToolCalls: request.ToolCalls,
+			ToolName:  request.ToolName,
+			Created:   schemas.NewDatetime(),
+		}
+		session.Agent.Messages = append(session.Agent.Messages, tmp)
+		session.Waiting = true
+
+		session.mutex.Unlock()
+
+		err := session.infer_chat_completions()
+
+		session.mutex.Lock()
+		session.Waiting = false
+		session.mutex.Unlock()
+
+		if err == nil {
+			return nil
+		} else {
+			return err
+		}
+
+	} else {
+		return fmt.Errorf("Session is busy, waiting for LLM response ...")
+	}
+
+}
+
+func (session *Session) SetAdapter(adapter types.Adapter) {
+
+	if adapter != nil {
+		session.adapters[adapter.Name()] = adapter
+	}
+
+}
+
+func (session *Session) SetTool(tool types.Tool) {
+
+	if tool != nil {
+		session.tools[tool.Name()] = tool
+	}
+
+}
+
+func (session *Session) UnloadSkill(name string, skill *types.Skill) error {
+
+	index := int(-1)
+
+	session.mutex.Lock()
+
+	for m, message := range session.Agent.Messages {
+
+		if message.Role == "system" && message.Content == skill.Body {
+			index = m
+			break
+		}
+
+	}
+
+	session.mutex.Unlock()
+
+	if index != -1 {
+
+		system_messages := make([]*schemas.Message, 0)
+		other_messages  := make([]*schemas.Message, 0)
+
+		session.mutex.Lock()
+
+		for _, message := range session.Agent.Messages {
+
+			if message.Role == "system" {
+
+				if message.Content != skill.Body {
+					system_messages = append(system_messages, message)
+				}
+
+			} else {
+				other_messages = append(other_messages, message)
+			}
+
+		}
+
+		session.Agent.Messages = append(system_messages, other_messages...)
+
+		session.mutex.Unlock()
+
+		return nil
+
+	} else {
+		return fmt.Errorf("Session.UnloadSkill: %s", "Skill is already unloaded.")
+	}
+
+}
+
+func (session *Session) infer_chat_completions() error {
+
+	// NOTE: Resolve provider-specific URLs, model aliases and tokens
+	resolved_url   := session.Config.ResolveURL(session.Agent.Model, "/chat/completions")
+	resolved_model := session.Config.ResolveModel(session.Agent.Model)
+	resolved_token := session.Config.ResolveToken(session.Agent.Model)
+
+	chat_request := schemas.ChatRequest{
+		Model:       resolved_model,
+		Temperature: session.Agent.Temperature,
+		Messages:    session.Agent.Messages,
+		Stream:      false,
+		Tools:       session.GetToolSchemas(),
+		ToolChoice:  "auto",
+		Options:     nil,
+		// TODO: How to set Options correctly? Is there an API for this?
+		// Options:     &schemas.Options{
+		// 	NumContext: 262144,
+		// 	NumPredict: 8192,
+		// },
+	}
+
+	// NOTE: Transform Requests via provider-specific Adapters
+	for _, adapter := range session.GetAdapters() {
+		chat_request = adapter.TransformRequest(chat_request)
+	}
+
+	request_payload, err0 := json.MarshalIndent(chat_request, "", "\t")
+
+	if session.Config.Debug == true {
+		session.Recovery.SnapshotBytes("request", request_payload)
+	}
+
+	if err0 == nil {
+
+		request, err1 := net_http.NewRequest(
+			net_http.MethodPost,
+			resolved_url.String(),
+			bytes.NewReader(request_payload),
+		)
+
+		if err1 == nil {
+
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Accept", "application/json")
+
+			if resolved_token != "" {
+				request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", resolved_token))
+			}
+
+			response, err2 := session.client.Do(request)
+
+			if err2 == nil && response.StatusCode == 200 {
+
+				response_payload, err3 := io.ReadAll(response.Body)
+
+				if err3 == nil {
+
+					if session.Config.Debug == true {
+						session.Recovery.SnapshotBytes("response", response_payload)
+					}
+
+					var chat_response schemas.ChatResponse
+
+					err4 := json.Unmarshal(response_payload, &chat_response)
+
+					// NOTE: Transform Responses via provider-specific Adapters
+					for _, adapter := range session.GetAdapters() {
+						chat_response = adapter.TransformResponse(chat_response)
+					}
+
+					if err4 == nil {
+
+						session.mutex.Lock()
+
+						if chat_response.Usage != nil && chat_response.Usage.TotalTokens != 0 {
+
+							session.Agent.ContextUsage.Tokens           = chat_response.Usage.PromptTokens
+							session.Agent.ContextUsage.PromptTokens     += chat_response.Usage.PromptTokens
+							session.Agent.ContextUsage.CompletionTokens += chat_response.Usage.CompletionTokens
+							session.Agent.ContextUsage.TotalTokens      += chat_response.Usage.TotalTokens
+
+							pricing, has_pricing := session.Config.ResolvePricing(session.Agent.Model)
+
+							if has_pricing == true {
+
+								cached_tokens := chat_response.Usage.PromptTokensDetails.CachedTokens
+								input_tokens  := chat_response.Usage.PromptTokens
+								output_tokens := chat_response.Usage.CompletionTokens
+								cost          := 0.0
+
+								if cached_tokens > 0 && pricing.CachedInputPrice > 0 {
+
+									cost += float64(cached_tokens) * pricing.CachedInputPrice
+									cost += float64(input_tokens-cached_tokens) * pricing.InputPrice
+
+								} else {
+									cost += float64(input_tokens) * pricing.InputPrice
+								}
+
+								cost += float64(output_tokens) * pricing.OutputPrice
+
+								session.Agent.ContextUsage.Cost += cost / 1000000.0
+
+							}
+
+						} else {
+							session.Agent.ContextUsage.Tokens = utils_chat.CalculateTokens(session.Agent.Messages)
+						}
+
+						session.mutex.Unlock()
+
+						if len(chat_response.Choices) > 0 {
+							return session.ReceiveChatResponse(chat_response.Choices[0].Message)
+						} else {
+							return fmt.Errorf("Empty choices, maybe incompatible API?")
+						}
+
+					} else {
+						return err4
+					}
+
+				} else {
+					return err3
+				}
+
+			} else if err2 == nil && response.StatusCode == 400 {
+
+				log_response_error(session.Console, response)
+
+				return fmt.Errorf("Server %s for Model %s is incompatible with OpenAPI /v1 schema", resolved_url.String(), resolved_model)
+
+			} else if err2 == nil && response.StatusCode == 401 {
+
+				log_response_error(session.Console, response)
+
+				return fmt.Errorf("Server %s for Model %s has invalid authentication token", resolved_url.String(), resolved_model)
+
+			} else if err2 == nil && response.StatusCode == 402 {
+
+				log_response_error(session.Console, response)
+
+				return fmt.Errorf("Server %s for Model %s requires a subscription", resolved_url.String(), resolved_model)
+
+			} else if err2 == nil && response.StatusCode == 403 {
+
+				log_response_error(session.Console, response)
+
+				return fmt.Errorf("Server %s for Model %s requires a valid authentication token", resolved_url.String(), resolved_model)
+
+			} else if err2 == nil && response.StatusCode == 404 {
+
+				return fmt.Errorf("Server %s for Model %s does not recognize the model name", resolved_url.String(), resolved_model)
+
+			} else if err2 == nil && response.StatusCode == 429 {
+
+				return fmt.Errorf("Server %s for Model %s usage quota exceeded", resolved_url.String(), resolved_model)
+
+			} else {
+
+				if err2 != nil {
+					return err2
+				}
+
+				var api_error schemas.Error
+
+				response_payload, _ := io.ReadAll(response.Body)
+				json.Unmarshal(response_payload, &api_error)
+
+				if api_error.Error() != "" {
+					return fmt.Errorf("Server %s returned unexpected HTTP error %d with message %s", resolved_url.String(), response.StatusCode, api_error.Error())
+				} else {
+					return fmt.Errorf("Server %s returned unexpected HTTP error %d", resolved_url.String(), response.StatusCode)
+				}
+
+			}
+
+		} else {
+			return err1
+		}
+
+	} else {
+		return err0
+	}
+
+}
+

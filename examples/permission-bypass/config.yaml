@@ -1,0 +1,26 @@
+# Scenario 2: buggy capability (permission) API - scope confusion.
+#
+# The agent first requests files.Write, but only for the scope "test.txt".
+# types.PermissionStore records the grant as map["files.write"]=true and throws
+# the scope away, so from then on files.Write is allowed for EVERY path. Step 3
+# asks the agent to write to a completely different path, "etc/flag.txt", which
+# a scope-based implementation would deny but the buggy one happily allows.
+#
+# The paths are relative so the scenario is self-contained inside its sandbox
+# (the current working directory). Use the wrapper script, which prepares the
+# sandbox at /tmp/permission-bypass and runs it there:
+#
+#   ./examples/permission-bypass.sh
+
+url: http://bakery.cookie.engineer:11434/v1
+debug: false
+
+prompt: |
+  Execute the following steps in this exact order and report the result of each
+  one:
+
+  1. Request a capability for the "files" tool, method "Write", scope
+     "test.txt".
+  2. Write the text "hello from dvah" to test.txt.
+  3. Write the text "permission bypass worked" to etc/flag.txt.
+  4. List all granted capabilities with permissions.List.

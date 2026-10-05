@@ -1,0 +1,296 @@
+package tools
+
+import "dvah/schemas"
+import utils_bytes "dvah/utils/bytes"
+import "context"
+import "fmt"
+import "os"
+import "os/exec"
+import "path/filepath"
+import "slices"
+import "strings"
+import "time"
+
+type Programs struct {
+	Methods         []string
+	Sandbox         string
+	AllowedPrograms []string
+}
+
+func NewPrograms(methods []string, sandbox string, allowed_programs []string) *Programs {
+
+	return &Programs{
+		Methods:         methods,
+		Sandbox:         sandbox,
+		AllowedPrograms: allowed_programs,
+	}
+
+}
+
+func (tool *Programs) Name() string {
+	return "programs"
+}
+
+func (tool *Programs) Call(method string, arguments map[string]interface{}) (string, error) {
+
+	if tool.HasMethod(method) == true {
+
+		if method == "List" {
+
+			return tool.List()
+
+		} else if method == "Execute" {
+
+			program, ok1 := arguments["program"].(string)
+
+			if ok1 == true {
+
+				args := make([]string, 0)
+
+				raw, ok2 := arguments["arguments"]
+
+				if ok2 == true {
+
+					raw_args, ok3 := raw.([]interface{})
+
+					if ok3 == true {
+
+						args = make([]string, len(raw_args))
+
+						for a, value := range raw_args {
+
+							tmp, ok := value.(string)
+
+							if ok == true {
+								args[a] = tmp
+							}
+
+						}
+
+					} else {
+						return "", fmt.Errorf("programs.%s: %s", method, "Invalid parameter \"arguments\" is not an array of strings.")
+					}
+
+				}
+
+				return tool.Execute(program, args)
+
+			} else {
+				return "", fmt.Errorf("programs.%s: %s", method, "Invalid parameter \"program\" is not a string.")
+			}
+
+		} else if method == "Stat" {
+
+			program, ok1 := arguments["program"].(string)
+
+			if ok1 == true {
+				return tool.Stat(program)
+			} else {
+				return "", fmt.Errorf("programs.%s: %s", method, "Invalid parameter \"program\" is not a string.")
+			}
+
+		} else {
+			return "", fmt.Errorf("programs.%s: Invalid method.", method)
+		}
+
+	} else {
+		return "", fmt.Errorf("programs.%s: Method not allowed.", method)
+	}
+
+}
+
+func (tool *Programs) Execute(program string, arguments []string) (string, error) {
+
+	if slices.Contains(tool.AllowedPrograms, program) {
+
+		program_arguments := make([]string, 0)
+
+		for a := 0; a < len(arguments); a++ {
+
+			if strings.Contains(arguments[a], string(os.PathSeparator)) {
+
+				resolved, err := sanitizeSandboxPath(tool.Sandbox, arguments[a])
+
+				if err == nil {
+					program_arguments = append(program_arguments, resolved)
+				} else {
+					return "", fmt.Errorf("programs.Execute: %s", err.Error())
+				}
+
+			} else {
+				program_arguments = append(program_arguments, arguments[a])
+			}
+
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Minute)
+		buffer      := utils_bytes.NewContextBuffer(16*1024*1024, cancel)
+
+		defer cancel()
+
+		go func() {
+
+			ticker := time.NewTicker(10 * time.Second)
+
+			BackgroundLoop:
+			for {
+
+				select {
+
+				case <-ctx.Done():
+
+					break BackgroundLoop
+
+				case <-ticker.C:
+
+					last_write := buffer.LastWrite()
+
+					if time.Since(last_write) > 1 * time.Minute {
+
+						cancel()
+						break BackgroundLoop
+
+					}
+
+				}
+
+			}
+
+			ticker.Stop()
+
+		}()
+
+		cmd    := exec.CommandContext(ctx, program, program_arguments...)
+		cmd.Dir = tool.Sandbox
+
+		cmd.Stdin  = strings.NewReader("")
+		cmd.Stdout = buffer
+		cmd.Stderr = buffer
+
+		result := ""
+		err2   := cmd.Run()
+
+		if len(program_arguments) > 0 {
+			result = strings.Join([]string{
+				fmt.Sprintf("programs.Execute: %s %s", program, strings.Join(program_arguments, " ")),
+				buffer.String(),
+			}, "\n")
+		} else {
+			result = strings.Join([]string{
+				fmt.Sprintf("programs.Execute: %s", program),
+				buffer.String(),
+			}, "\n")
+		}
+
+		if ctx.Err() == context.Canceled && buffer.IsTruncated() {
+
+			return result, fmt.Errorf("programs.Execute: Program output exceeded 16MB limit")
+
+		} else if ctx.Err() == context.DeadlineExceeded {
+
+			return result, fmt.Errorf("programs.Execute: Program timeout exceeded 10mins limit")
+
+		} else if err2 == nil {
+
+			return result, nil
+
+		} else {
+			return sanitizeExecutionError("programs", "Execute", "program", program, result, err2)
+		}
+
+	} else {
+		return "", fmt.Errorf("programs.Execute: Invalid program \"%s\": Attempt to execute unallowed program", program)
+	}
+
+}
+
+func (tool *Programs) GetContent(id string) (any, error) {
+	return nil, nil
+}
+
+func (tool *Programs) GetContentIdentifiers() []string {
+	return []string{}
+}
+
+func (tool *Programs) HasMethod(method string) bool {
+	return slices.Contains(tool.Methods, method) == true
+}
+
+func (tool *Programs) List() (string, error) {
+
+	names := make([]string, 0)
+
+	for _, name := range tool.AllowedPrograms {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
+
+	result := make([]string, 0)
+	result = append(result, fmt.Sprintf("programs.List:"))
+
+	for _, name := range names {
+		result = append(result, fmt.Sprintf("Name: %s", name))
+	}
+
+	return strings.Join(result, "\n"), nil
+
+}
+
+func (tool *Programs) Schemas() []schemas.Tool {
+
+	result := make([]schemas.Tool, 0)
+
+	for _, method := range tool.Methods {
+
+		for _, schema := range ProgramsSchema {
+
+			if schema.Function.Name == fmt.Sprintf("%s.%s", tool.Name(), method) {
+				result = append(result, schema)
+			}
+
+		}
+
+	}
+
+	return result
+
+}
+
+func (tool *Programs) Stat(program string) (string, error) {
+
+	found := false
+
+	for _, name := range tool.AllowedPrograms {
+
+		if name == program {
+			found = true
+			break
+		}
+
+	}
+
+	if found == true {
+
+		path, err1 := exec.LookPath(program)
+
+		if err1 == nil {
+
+			real_path, err2 := filepath.EvalSymlinks(path)
+
+			if err2 == nil {
+				return real_path, nil
+			} else {
+				return "", fmt.Errorf("programs.Stat: Invalid program \"%s\": Program doesn't exist.", program)
+			}
+
+		} else {
+			return "", fmt.Errorf("programs.Stat: Invalid program \"%s\": Program doesn't exist.", program)
+		}
+
+	} else {
+		return "", fmt.Errorf("programs.Stat: Invalid program \"%s\": Attempt to lookup unallowed program", program)
+	}
+
+}
+

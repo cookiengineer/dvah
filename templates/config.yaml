@@ -1,0 +1,55 @@
+# dvah runtime config template
+#
+# Usage:
+#   dvah templates/agent.yaml templates/config.yaml
+#
+# Merge order (later wins):
+#   built-in defaults  <  ~/.config/dvah/config.yaml  <  this file
+#
+# Agent identity (name, role, model, temperature) is owned by agent.yaml and is
+# intentionally ignored here. This file only carries runtime settings:
+# endpoint URL, debug flag, the first user prompt, and the provider/token map.
+
+# OpenAI-compatible endpoint used for every model that has no provider entry
+# below. Ollama exposes one at /v1.
+url: http://bakery.cookie.engineer:11434/v1
+debug: false
+
+# Sent as the first user message, directly after the agent's system prompt.
+prompt: |
+  Introduce yourself in one sentence and then wait for my instructions.
+
+# Provider map. Each key is the model name used in agent.yaml ("ollama style");
+# "alias" is the model name the provider API expects and is what gets sent as
+# the "model" field. Tokens are read from here, never from agent.yaml.
+providers:
+
+  # DeepSeek's API names are "deepseek-v4-pro" and "deepseek-flash".
+  # The legacy names "deepseek-v4-flash" / "deepseek-v4-flash-vision" are still
+  # accepted but retired and billed as flash.
+  deepseek-v4-pro:cloud:
+    model: deepseek-v4-pro:cloud
+    url: https://api.deepseek.com
+    alias: deepseek-v4-pro
+    token: "sk-REPLACE_ME"
+    pricing:
+      input_price: 1.32
+      output_price: 3.96
+      cached_input_price: 0.044
+
+  deepseek-flash:cloud:
+    model: deepseek-flash:cloud
+    url: https://api.deepseek.com
+    alias: deepseek-flash
+    token: "sk-REPLACE_ME"
+    pricing:
+      input_price: 0.30
+      output_price: 1.20
+      cached_input_price: 0.006
+
+  # A model on another Ollama host needs no token; only add an entry if its
+  # endpoint differs from the global "url" above.
+  # huihui_ai/Qwen3.8-abliterated:27b:
+  #   model: huihui_ai/Qwen3.8-abliterated:27b
+  #   url: http://bakery.cookie.engineer:11434/v1
+  #   alias: huihui_ai/Qwen3.8-abliterated:27b

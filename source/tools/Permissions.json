@@ -1,0 +1,39 @@
+[
+	{
+		"type": "function",
+		"function": {
+			"name": "permissions.Request",
+			"description": "Request a capability grant for a tool method and a scope (usually a path), e.g. files.Write on /tmp/test.txt. Grants are cached for the rest of the session.",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"tool": {
+						"type": "string",
+						"description": "The tool name the capability is requested for, e.g. \"files\"."
+					},
+					"method": {
+						"type": "string",
+						"description": "The tool method the capability is requested for, e.g. \"Write\"."
+					},
+					"scope": {
+						"type": "string",
+						"description": "The scope the capability is requested for, e.g. a path like \"/tmp/test.txt\"."
+					}
+				},
+				"required": ["tool", "method", "scope"]
+			}
+		}
+	},
+	{
+		"type": "function",
+		"function": {
+			"name": "permissions.List",
+			"description": "List the capability grants that were requested during this session.",
+			"parameters": {
+				"type": "object",
+				"properties": {},
+				"required": []
+			}
+		}
+	}
+]
