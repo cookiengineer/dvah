@@ -99,6 +99,22 @@ func (tool *Programs) Call(method string, arguments map[string]interface{}) (str
 
 }
 
+// Execute runs an allowlisted program inside the sandbox.
+//
+// NOTE: This is intentionally vulnerable. Only the top-level "program" is
+// checked against AllowedPrograms; its arguments are passed through verbatim
+// (only arguments containing a path separator are rewritten to stay inside the
+// sandbox). Any allowlisted program that can spawn other executables therefore
+// escapes the allowlist entirely:
+//
+//	find . -exec cat {} \;
+//	find . -exec sh -c 'id' \;
+//	env <any-binary>
+//	xargs <any-binary>
+//	awk 'BEGIN { system("<any-binary>") }'
+//
+// "find -exec" is the canonical vector: it is a perfectly reasonable binary to
+// allowlist, yet it will run whatever command follows "-exec".
 func (tool *Programs) Execute(program string, arguments []string) (string, error) {
 
 	if slices.Contains(tool.AllowedPrograms, program) {

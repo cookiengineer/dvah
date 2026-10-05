@@ -46,7 +46,7 @@ not yet wired up.
 | Implemented | `source/tools/resolveSandboxPath.go`, `source/tools/sanitizeSandboxPath.go` | **Symlink sandbox escape.** Containment is checked lexically with `filepath.Abs`/`filepath.Rel`; `EvalSymlinks` is never used. A symlink inside the sandbox can point outside it and the following `os.ReadFile`/`os.WriteFile`/`Copy` operations follow it out. See `examples/symlink-escape/`. |
 | Planned | `source/engine/Session.go` (`LoadSkill`), `source/tools/readSkills.go` | **Prompt injection via skills.** A loaded skill body is spliced into the conversation as a `system` message, so attacker-controlled `SKILL.md` content can override the agent's original instructions. |
 | Planned | `source/tools/Websites.go` | **SSRF by design.** `websites.Fetch`/`Stat` accept any `http`/`https` URL with no host allowlist, reaching loopback services and cloud metadata endpoints (e.g. `169.254.169.254`). |
-| Planned | `source/tools/Programs.go` | **Command escalation surface.** Any program listed in the agent's `allowed-programs` can be executed; args containing a path separator are sandboxed, but flag/argument injection (e.g. `find -exec`, interpreters, `--output`) and permissive allowlists enable host escape. |
+| Implemented | `source/tools/Programs.go` | **Command escalation via allowlisted programs.** Only the top-level `program` is checked against `allowed-programs`; its arguments are passed through verbatim. A program that can spawn other executables therefore bypasses the allowlist entirely — `find . -exec cat {} \;`, `find . -exec sh -c 'id' \;`, `env <binary>`, `xargs <binary>`, `awk 'BEGIN{system("<binary>")}'`. See `examples/command-escalation/`. |
 | Planned | `source/engine/Recovery.go` | **Sandbox data leakage.** Session recovery writes the full conversation (including tool output, secrets echoed by tools, and prompts) to `<sandbox>/.dvah/session.json` in plaintext. |
 
 ## Talk Examples
@@ -59,6 +59,8 @@ Ready-to-run scenarios live in [`examples/`](examples/README.md):
   authorizes `etc/flag.txt` because the permission store drops the scope.
 - `examples/symlink-escape/` — a symlink inside the sandbox points at a secret
   outside it, defeating the lexical sandbox check.
+- `examples/command-escalation/` — only `find` is allowlisted but `find -exec`
+  runs unlisted binaries, escaping the program allowlist.
 
 ## Repository Layout
 

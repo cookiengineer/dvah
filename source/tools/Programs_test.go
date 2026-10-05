@@ -442,3 +442,38 @@ func TestPrograms_Call_OptionalArguments(t *testing.T) {
 	})
 
 }
+
+func TestPrograms_Execute_FindExecEscalation(t *testing.T) {
+
+	playground, _ := os.MkdirTemp("/tmp", "dvah-test-programs-*")
+	sandbox       := filepath.Join(playground, "programs")
+
+	os.MkdirAll(sandbox, 0755)
+
+	// NOTE: "echo" is deliberately NOT in the allowlist. Because only the
+	// top-level program is checked, find's -exec still runs it. This is the
+	// command escalation vulnerability.
+	tool := NewPrograms([]string{"Execute"}, sandbox, []string{"find"})
+
+	result, err := tool.Execute("find", []string{".", "-maxdepth", "0", "-exec", "echo", "DVH_ESCALATED", ";"})
+
+	if err != nil {
+		t.Fatalf("Expected %v to be nil", err)
+	}
+
+	parts  := strings.SplitN(result, "\n", 2)
+	output := ""
+
+	if len(parts) > 1 {
+		output = parts[1]
+	}
+
+	if strings.Contains(output, "DVH_ESCALATED") == false {
+		t.Errorf("Expected find -exec to run the unlisted program, got:\n%s", result)
+	}
+
+	t.Cleanup(func() {
+		os.RemoveAll(playground)
+	})
+
+}
