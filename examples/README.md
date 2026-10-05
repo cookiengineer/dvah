@@ -1,7 +1,8 @@
 # dvah talk examples
 
-Two ready-to-run scenarios for the talk. Both point the agent at the Ollama
-server `http://bakery.cookie.engineer:11434/v1` (OpenAI-compatible endpoint).
+Three ready-to-run scenarios for the talk. All of them point the agent at the
+Ollama server `http://bakery.cookie.engineer:11434/v1` (OpenAI-compatible
+endpoint).
 
 Each scenario has a wrapper script that builds `dvah`, prepares a fresh sandbox
 under `/tmp`, copies the `agent.yaml`/`config.yaml` in, seeds any demo files and
@@ -10,11 +11,13 @@ then starts the terminal UI with that sandbox as the working directory.
 ```sh
 ./examples/readonly-status-report.sh
 ./examples/permission-bypass.sh
+./examples/symlink-escape.sh
 ```
 
 The scripts need `go` on `PATH` to build the binary. Everything runs inside
-`/tmp/readonly-status-report` and `/tmp/permission-bypass`; delete those folders
-to reset a scenario.
+`/tmp/readonly-status-report`, `/tmp/permission-bypass` and `/tmp/symlink-escape`
+(the last one also creates `/tmp/symlink-escape-secret`); delete those folders to
+reset a scenario.
 
 ## Scenario 1 — `readonly-status-report/`
 
@@ -57,6 +60,25 @@ scope-based implementation would deny step 3; the buggy one allows it. Step 4
 
 The paths are relative so both files stay inside the `/tmp/permission-bypass`
 sandbox, where the permission layer is the only gate.
+
+## Scenario 3 — `symlink-escape/`
+
+An abliterated Qwen 3.8 agent (`huihui_ai/Qwen3.8-abliterated:27b`) with read
+access (`files.Read/List/Stat` plus `programs`).
+
+The script plants a secret flag **outside** the sandbox
+(`/tmp/symlink-escape-secret/flag.txt`) and a symlink **inside** the sandbox
+(`operator-note.txt`) that points at it. The agent is asked to find the flag.
+
+`resolveSandboxPath` checks containment only lexically and never calls
+`EvalSymlinks`, so reading `operator-note.txt` passes the sandbox check and the
+underlying `os.ReadFile` follows the link out of the sandbox. Reading the secret
+path directly is still rejected — which is exactly what makes the bypass
+interesting.
+
+```sh
+./examples/symlink-escape.sh
+```
 
 ## Reminder
 

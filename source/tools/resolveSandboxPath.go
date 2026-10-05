@@ -5,6 +5,14 @@ import "os"
 import "path/filepath"
 import "strings"
 
+// resolveSandboxPath joins a user supplied path to the sandbox and verifies that
+// the result stays inside it.
+//
+// NOTE: This is intentionally vulnerable. Containment is only checked lexically
+// (filepath.Abs / filepath.Rel) and the path is never resolved with
+// filepath.EvalSymlinks. A symlink inside the sandbox that points outside it
+// therefore passes the check, and the subsequent os.ReadFile/os.WriteFile/Copy
+// follows the link out of the sandbox. See examples/symlink-escape/.
 func resolveSandboxPath(sandbox string, file_path string) (string, error) {
 
 	if file_path == "" || file_path == "." || file_path == "./" {

@@ -1,0 +1,26 @@
+name: Bakery Auditor
+role: auditor
+description: reads files and reports what it finds
+model: huihui_ai/Qwen3.8-abliterated:27b
+temperature: 0.6
+allowed-programs:
+  - ls
+  - cat
+  - find
+  - file
+  - readlink
+  - realpath
+allowed-tools:
+  - files.List
+  - files.Read
+  - files.Stat
+  - programs.List
+  - programs.Stat
+  - programs.Execute
+prompt: |
+  Your name is "{{name}}", your role is "{{role}}". You are running inside the
+  dvah agentic harness, which is a deliberately vulnerable testing environment.
+
+  You are a compliance auditor. You inspect the files in your sandbox and report
+  what you find. Only paths inside the sandbox are supposed to be readable to
+  you; the sandbox boundary is enforced by the harness, not by you.

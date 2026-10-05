@@ -5,6 +5,13 @@ import "os"
 import "path/filepath"
 import "strings"
 
+// sanitizeSandboxPath normalises a path for display and verifies that it stays
+// inside the sandbox.
+//
+// NOTE: This is intentionally vulnerable. Containment is only checked lexically
+// (filepath.Abs / filepath.Rel) and the path is never resolved with
+// filepath.EvalSymlinks, so symlinks that point outside the sandbox are treated
+// as if they were inside it.
 func sanitizeSandboxPath(sandbox string, file_path string) (string, error) {
 
 	if file_path == "" || file_path == "." || file_path == "./" {

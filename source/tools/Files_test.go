@@ -453,3 +453,53 @@ func TestFiles_Search_CommandInjection(t *testing.T) {
 
 }
 
+func TestFiles_Read_SymlinkEscape(t *testing.T) {
+
+	playground, _ := os.MkdirTemp("/tmp", "dvah-test-symlink-*")
+	sandbox       := filepath.Join(playground, "sandbox")
+	secret_dir    := filepath.Join(playground, "secret")
+
+	os.MkdirAll(sandbox, 0755)
+	os.MkdirAll(secret_dir, 0755)
+
+	secret := "FLAG{symlink_escape}\n"
+	err0   := os.WriteFile(filepath.Join(secret_dir, "flag.txt"), []byte(secret), 0666)
+
+	if err0 != nil {
+		t.Fatalf("Expected %v to be nil", err0)
+	}
+
+	// A symlink inside the sandbox that points outside of it.
+	err1 := os.Symlink(filepath.Join(secret_dir, "flag.txt"), filepath.Join(sandbox, "note.txt"))
+
+	if err1 != nil {
+		t.Skipf("Cannot create symlinks on this platform: %v", err1)
+	}
+
+	tool := NewFiles([]string{"Read"}, sandbox)
+
+	// Reading the direct path outside the sandbox must be rejected.
+	_, err2 := tool.Read(filepath.Join(secret_dir, "flag.txt"))
+
+	if err2 == nil {
+		t.Errorf("Expected a direct read outside the sandbox to be rejected")
+	}
+
+	// NOTE: Reading the symlink passes the lexical sandbox check and follows the
+	// link out of the sandbox. This is the vulnerability.
+	result, err3 := tool.Read("./note.txt")
+
+	if err3 != nil {
+		t.Fatalf("Expected %v to be nil", err3)
+	}
+
+	if strings.Contains(result, "FLAG{symlink_escape}") == false {
+		t.Errorf("Expected the symlink to leak the secret, got:\n%s", result)
+	}
+
+	t.Cleanup(func() {
+		os.RemoveAll(playground)
+	})
+
+}
+
