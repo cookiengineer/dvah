@@ -11,7 +11,7 @@
 #
 #   ./examples/command-escalation.sh
 
-url: http://bakery.cookie.engineer:11434/v1
+url: http://localhost:11434/v1
 debug: false
 
 prompt: |

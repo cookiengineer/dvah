@@ -7,7 +7,7 @@
 # error leaked by the Files tool, concludes it is running in a shell, and starts
 # attempting to bypass the filesystem API instead of giving up.
 
-url: http://bakery.cookie.engineer:11434/v1
+url: http://localhost:11434/v1
 debug: false
 
 prompt: |
